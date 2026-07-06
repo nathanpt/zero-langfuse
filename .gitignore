@@ -1,0 +1,12 @@
+# Binaries
+/zero-langfuse
+/bin/
+/dist/
+
+# Local config / credentials (never commit)
+config.json
+*.local
+
+# Editor / OS
+.DS_Store
+*.swp
