@@ -3,21 +3,31 @@
 // `zero exec`, and specialist sub-agents). It is the single source of truth for
 // zero-langfuse (DESIGN §4).
 //
-// Phase 0 scope: this package loads and pretty-prints a session. The event
-// envelope field names are settled only after a live capture (DESIGN §13), so
-// parsing is deliberately envelope-agnostic: type/sequence/timestamp are
-// extracted by best-effort over common keys and the full raw object is retained
-// so `dump` reveals the real shape — which is the explicit purpose of Phase 0.
+// The event schema below is confirmed against the Zero source
+// (internal/sessions/store.go, internal/usage/report.go, internal/cli/exec.go,
+// internal/tui/model.go) and settles DESIGN §13:
+//
+//   - Q1 (trace segmentation): both exec and the TUI append a user `message`
+//     event ({"role":"user","content":<prompt>}) before each turn's assistant
+//     work, so "one trace per user turn" holds for both surfaces.
+//   - Q2 (cache semantics): persisted `promptTokens` = EffectiveInputTokens() =
+//     the TOTAL input (uncached + cache-read + cache-write). Cost must therefore
+//     subtract BOTH cachedInputTokens and cacheWriteTokens from the input pool
+//     (Zero's own CalculateCost does; DESIGN §7 as written double-counts
+//     cacheWriteTokens — corrected for Phase 1).
+//   - Q3 (assistant-message completeness): the assistant `message` carries
+//     result.FinalAnswer in a single event — one read, no delta reassembly.
+//
+// Phase 0 scope: this package loads a session and pretty-prints every event.
+// Payloads are dumped verbatim (not interpreted into traces) — interpretation,
+// segmentation, and cost are Phase 1.
 package session
 
-import (
-	"encoding/json"
-	"strconv"
-)
+import "encoding/json"
 
-// Known event types written by Zero's session store (DESIGN §4.1). These are
-// the only facts about the schema DESIGN source-verifies; the payload shapes
-// for most are resolved at Phase 0.
+// Known event types written by Zero's session store (store.go). Mirrors the
+// upstream sessions.EventType constants; kept here so the reader/dump do not
+// import Zero's internal package.
 const (
 	EventMessage            = "message"
 	EventToolCall           = "tool_call"
@@ -34,78 +44,174 @@ const (
 	EventSessionChild       = "session_child"
 	EventSpecialistStart    = "specialist_start"
 	EventSpecialistStop     = "specialist_stop"
+	EventSpecDraft          = "spec_draft"
+	EventSpecApproved       = "spec_approved"
+	EventSpecRejected       = "spec_rejected"
 )
 
-// Event is one line of events.jsonl. The envelope field names are confirmed by
-// the Phase 0 capture, so Type/Sequence/Timestamp are best-effort extractions;
-// Raw and Object preserve everything for display and later typed access.
+// Event is one line of events.jsonl, mapped to Zero's sessions.Event envelope
+// (store.go:173):
+//
+//	type Event struct {
+//	  ID, SessionID string; Sequence int; Type EventType
+//	  CreatedAt string; Payload json.RawMessage
+//	}
+//
+// Raw is the original line bytes; Payload is extracted for display. A line that
+// is not a JSON object is treated as torn (see parseEvent).
 type Event struct {
 	// Line is the 1-based source line in events.jsonl.
 	Line int
-	// Type is the best-effort event type (key "type", then "event"/"eventType").
-	Type string
-	// Sequence is the best-effort sequence number (key "sequence", then "seq").
+	// ID is the event id (store-assigned).
+	ID string
+	// SessionID is the owning session id.
+	SessionID string
+	// Sequence is the 1-based event sequence within the session.
 	Sequence int
-	// Timestamp is the best-effort raw timestamp string (key "timestamp", then
-	// "time"/"ts"/"at").
-	Timestamp string
-	// Raw is the original line bytes (re-pretty-printed on dump).
+	// Type is the event type ("message", "provider_usage", …).
+	Type string
+	// CreatedAt is the event timestamp (RFC3339, key "createdAt").
+	CreatedAt string
+	// Payload is the event body (key "payload"); nil when absent.
+	Payload json.RawMessage
+	// Raw is the original JSONL line bytes.
 	Raw json.RawMessage
-	// Object is the parsed object for typed access in later phases.
-	Object map[string]any
 }
 
-// parseEvent parses one JSONL line. It returns nil for malformed/torn lines;
-// callers record those as skipped (DESIGN §6.3: never abort the trace on a torn
-// trailing line — Zero's own reader ignores them).
-func parseEvent(line int, raw []byte) *Event {
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil
-	}
-	// A valid JSON value that is not an object (e.g. a bare number) is not a
-	// session event; treat as torn.
-	if obj == nil {
+// rawEvent mirrors the on-disk envelope for JSON decoding.
+type rawEvent struct {
+	ID        string          `json:"id"`
+	SessionID string          `json:"sessionId"`
+	Sequence  int             `json:"sequence"`
+	Type      string          `json:"type"`
+	CreatedAt string          `json:"createdAt"`
+	Payload   json.RawMessage `json:"payload"`
+}
+
+// parseEvent parses one JSONL line into an Event. It returns nil for malformed
+// or non-object lines; callers record those as torn (DESIGN §6.3: never abort
+// the trace on a torn trailing line — Zero's own reader ignores them).
+func parseEvent(line int, b []byte) *Event {
+	var r rawEvent
+	// A bare scalar/array/string fails to unmarshal into the struct and is
+	// treated as torn, matching Zero's own lastEventSequence robustness.
+	if err := json.Unmarshal(b, &r); err != nil {
 		return nil
 	}
 	return &Event{
 		Line:      line,
-		Type:      pickStr(obj, "type", "event", "eventType"),
-		Sequence:  pickInt(obj, "sequence", "seq"),
-		Timestamp: pickStr(obj, "timestamp", "time", "ts", "at"),
-		Raw:       append([]byte(nil), raw...),
-		Object:    obj,
+		ID:        r.ID,
+		SessionID: r.SessionID,
+		Sequence:  r.Sequence,
+		Type:      r.Type,
+		CreatedAt: r.CreatedAt,
+		Payload:   r.Payload,
+		Raw:       append([]byte(nil), b...),
 	}
 }
 
-// pickStr returns the first present string-valued key among candidates.
-func pickStr(obj map[string]any, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := obj[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
+// summaryPeek returns a compact one-line description of an event's payload for
+// the dump header, by best-effort peeking a few well-known fields per type. It
+// never fails; unknown shapes return "" (the full payload is still dumped).
+func (e *Event) summaryPeek() string {
+	if len(e.Payload) == 0 {
+		return ""
+	}
+	var p map[string]any
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return ""
+	}
+	switch e.Type {
+	case EventMessage:
+		role := asString(p["role"])
+		if role != "" {
+			return "role=" + role
+		}
+	case EventProviderUsage:
+		return usageSummary(p)
+	case EventToolCall:
+		if n := asString(p["name"]); n != "" {
+			return "tool=" + n
+		}
+		if n := asString(p["tool"]); n != "" {
+			return "tool=" + n
+		}
+	case EventToolResult:
+		if s := asString(p["status"]); s != "" {
+			return "status=" + s
+		}
+	case EventError:
+		if m := asString(p["message"]); m != "" {
+			return trunc(m, 60)
 		}
 	}
 	return ""
 }
 
-// pickInt returns the first present integer-valued key among candidates. JSON
-// numbers unmarshal as float64, so both float64 and string digits are handled.
-func pickInt(obj map[string]any, keys ...string) int {
-	for _, k := range keys {
-		if v, ok := obj[k]; ok {
-			switch n := v.(type) {
-			case float64:
-				return int(n)
-			case int:
-				return n
-			case string:
-				if i, err := strconv.Atoi(n); err == nil {
-					return i
-				}
-			}
-		}
+// usageSummary renders provider_usage token counts inline (promptTokens is the
+// TOTAL input incl. cache, per Q2 — shown split so cache is visible at a glance).
+func usageSummary(p map[string]any) string {
+	in := asInt(p["promptTokens"])
+	out := asInt(p["completionTokens"])
+	s := "in=" + itoa(in) + " out=" + itoa(out)
+	if c := asInt(p["cachedInputTokens"]); c > 0 {
+		s += " cacheRead=" + itoa(c)
+	}
+	if c := asInt(p["cacheWriteTokens"]); c > 0 {
+		s += " cacheWrite=" + itoa(c)
+	}
+	if c := asInt(p["reasoningTokens"]); c > 0 {
+		s += " reasoning=" + itoa(c)
+	}
+	if m := asString(p["model"]); m != "" {
+		s += " model=" + m
+	}
+	return s
+}
+
+func asString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func asInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
 	}
 	return 0
+}
+
+func itoa(n int) string {
+	// Avoid a strconv import just for this display helper.
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}
+
+func trunc(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

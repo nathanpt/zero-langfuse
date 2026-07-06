@@ -32,18 +32,19 @@ func writeSession(t *testing.T, root, id string, metadata, events []byte) string
 	return sd
 }
 
-// fixtureEvents models the DESIGN §4 event feed with a plausible Phase 0
-// envelope. The provider_usage payload matches usageEventPayload (§4.2) exactly.
-// The final line is deliberately torn.
+// fixtureEvents uses the real sessions.Event envelope
+// (id/sessionId/sequence/type/createdAt/payload). The provider_usage payload
+// mirrors usageEventPayload (usage/report.go:21): promptTokens is the TOTAL
+// input (uncached 30 + cacheRead 80 + cacheWrite 10). The final line is torn.
 func fixtureEvents() []byte {
 	return []byte(strings.Join([]string{
-		`{"type":"message","sequence":1,"timestamp":"2026-07-06T02:00:00Z","payload":{"role":"user","content":"hello"}}`,
-		`{"type":"message","sequence":2,"timestamp":"2026-07-06T02:00:01Z","payload":{"role":"assistant","content":"hi there"}}`,
-		`{"type":"tool_call","sequence":3,"timestamp":"2026-07-06T02:00:02Z","payload":{"tool":"read","toolCallId":"tc_1"}}`,
-		`{"type":"tool_result","sequence":4,"timestamp":"2026-07-06T02:00:03Z","payload":{"toolCallId":"tc_1","status":"ok"}}`,
-		`{"type":"provider_usage","sequence":5,"timestamp":"2026-07-06T02:00:04Z","payload":{"promptTokens":120,"completionTokens":45,"totalTokens":165,"cachedInputTokens":80,"cacheWriteTokens":0,"reasoningTokens":0}}`,
-		`{"type":"error","sequence":6,"timestamp":"2026-07-06T02:00:05Z","payload":{"message":"boom"}}`,
-		`{"type":"message","sequence":7` + "\n", // torn: truncated, no closing brace
+		`{"id":"e1","sessionId":"sess-abc","sequence":1,"type":"message","createdAt":"2026-07-06T02:00:00Z","payload":{"role":"user","content":"hello"}}`,
+		`{"id":"e2","sessionId":"sess-abc","sequence":2,"type":"message","createdAt":"2026-07-06T02:00:01Z","payload":{"role":"assistant","content":"hi there"}}`,
+		`{"id":"e3","sessionId":"sess-abc","sequence":3,"type":"tool_call","createdAt":"2026-07-06T02:00:02Z","payload":{"id":"tc_1","name":"read_file"}}`,
+		`{"id":"e4","sessionId":"sess-abc","sequence":4,"type":"tool_result","createdAt":"2026-07-06T02:00:03Z","payload":{"toolCallId":"tc_1","status":"ok"}}`,
+		`{"id":"e5","sessionId":"sess-abc","sequence":5,"type":"provider_usage","createdAt":"2026-07-06T02:00:04Z","payload":{"promptTokens":120,"completionTokens":45,"totalTokens":165,"cachedInputTokens":80,"cacheWriteTokens":10,"reasoningTokens":0}}`,
+		`{"id":"e6","sessionId":"sess-abc","sequence":6,"type":"error","createdAt":"2026-07-06T02:00:05Z","payload":{"message":"boom"}}`,
+		`{"id":"e7","sessionId":"sess-abc","sequence":7` + "\n", // torn: truncated, no closing brace
 	}, "\n"))
 }
 
@@ -72,25 +73,26 @@ func TestLoadParsesEventsAndFlagsTorn(t *testing.T) {
 		t.Errorf("TornLines = %v, want [7]", s.TornLines)
 	}
 }
-
-func TestParseEventBestEffortExtraction(t *testing.T) {
-	// Canonical keys.
-	ev := parseEvent(1, []byte(`{"type":"message","sequence":9,"timestamp":"t"}`))
-	if ev.Type != "message" || ev.Sequence != 9 || ev.Timestamp != "t" {
-		t.Errorf("canonical: %+v", ev)
+func TestParseEventEnvelope(t *testing.T) {
+	ev := parseEvent(1, []byte(`{"id":"e1","sessionId":"s","sequence":9,"type":"message","createdAt":"2026-07-06T02:00:00Z","payload":{"role":"user","content":"hi"}}`))
+	if ev == nil {
+		t.Fatal("nil event")
 	}
-	// Alternate keys still resolve.
-	ev = parseEvent(2, []byte(`{"event":"tool_call","seq":3,"ts":"x"}`))
-	if ev.Type != "tool_call" || ev.Sequence != 3 || ev.Timestamp != "x" {
-		t.Errorf("alt keys: %+v", ev)
+	if ev.ID != "e1" || ev.SessionID != "s" || ev.Sequence != 9 || ev.Type != "message" || ev.CreatedAt != "2026-07-06T02:00:00Z" {
+		t.Errorf("envelope fields wrong: %+v", ev)
 	}
-	// Malformed JSON → nil (torn).
-	if parseEvent(3, []byte(`{nope`)) != nil {
-		t.Error("malformed should be nil")
+	if got := string(ev.Payload); got != `{"role":"user","content":"hi"}` {
+		t.Errorf("payload = %q", got)
 	}
-	// Non-object JSON → nil.
-	if parseEvent(4, []byte(`42`)) != nil {
-		t.Error("bare scalar should be nil")
+	// payload is optional; the event still parses without it.
+	if ev2 := parseEvent(2, []byte(`{"sequence":1,"type":"message","createdAt":"t"}`)); ev2 == nil || len(ev2.Payload) != 0 {
+		t.Errorf("missing-payload event should parse: %+v", ev2)
+	}
+	// Malformed / non-object lines are torn (nil), never fatal.
+	for i, bad := range []string{`{nope`, `42`, `true`, `[1,2,3]`, `"str"`} {
+		if parseEvent(i, []byte(bad)) != nil {
+			t.Errorf("non-event %q should be nil", bad)
+		}
 	}
 }
 
@@ -136,6 +138,9 @@ func TestDumpRendersMetadataEventsAndSummary(t *testing.T) {
 		"\"modelId\": \"glm-5.2\"",
 		"events: 6 parsed, 1 torn/skipped",
 		"──[#1] message",
+		"role=user",
+		"role=assistant",
+		"in=120 out=45 cacheRead=80 cacheWrite=10", // Q2: promptTokens(total) split into cache fields
 		"──[#5] provider_usage",
 		"\"promptTokens\": 120",
 		"summary: 6 event(s)",

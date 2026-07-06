@@ -84,15 +84,23 @@ func dumpEvent(b *strings.Builder, ev *Event) {
 	if ev.Sequence != 0 {
 		fmt.Fprintf(b, " seq=%d", ev.Sequence)
 	}
-	if ev.Timestamp != "" {
-		fmt.Fprintf(b, " ts=%s", ev.Timestamp)
+	if ev.CreatedAt != "" {
+		fmt.Fprintf(b, " ts=%s", ev.CreatedAt)
+	}
+	if s := ev.summaryPeek(); s != "" {
+		fmt.Fprintf(b, " · %s", s)
 	}
 	fmt.Fprintln(b, " ──")
-	if pretty, err := prettyJSON(ev.Raw); err == nil {
-		writeIndented(b, pretty)
-	} else {
-		b.Write(ev.Raw)
-		b.WriteByte('\n')
+	switch {
+	case len(ev.Payload) > 0:
+		if pretty, err := prettyJSON(ev.Payload); err == nil {
+			writeIndented(b, pretty)
+		} else {
+			b.Write(ev.Payload)
+			b.WriteByte('\n')
+		}
+	default:
+		fmt.Fprintln(b, "(no payload)")
 	}
 	fmt.Fprintln(b)
 }

@@ -92,7 +92,7 @@ func loadDir(dir string) (*Session, error) {
 	if raw, err := os.ReadFile(filepath.Join(dir, metadataFile)); err == nil {
 		s.MetadataRaw = raw
 		_ = json.Unmarshal(raw, &s.Metadata)
-		if id := pickStr(s.Metadata, "sessionId", "id"); id != "" {
+		if id, ok := s.Metadata["sessionId"].(string); ok && id != "" {
 			s.ID = id
 		}
 	}
