@@ -13,8 +13,7 @@
 //   - Q2 (cache semantics): persisted `promptTokens` = EffectiveInputTokens() =
 //     the TOTAL input (uncached + cache-read + cache-write). Cost must therefore
 //     subtract BOTH cachedInputTokens and cacheWriteTokens from the input pool
-//     (Zero's own CalculateCost does; DESIGN §7 as written double-counts
-//     cacheWriteTokens — corrected for Phase 1).
+//     (Zero's CalculateCost cost.go:91 does; DESIGN §7 corrected to match).
 //   - Q3 (assistant-message completeness): the assistant `message` carries
 //     result.FinalAnswer in a single event — one read, no delta reassembly.
 //
@@ -24,6 +23,14 @@
 // engages under --output-format stream-json|json, or --init-session-id/
 // --resume/--fork. The TUI persists unconditionally. The trace/sync path must
 // therefore expect text-mode exec runs to be invisible to a log reader.
+//
+// Live-confirmed payload shapes (z.ai/glm-5.2, relevant for Phase 1):
+//   - tool_call.arguments is a JSON *string* (e.g. `{"path":"x"}`), not an
+//     object — tool-input extraction must json.Unmarshal it again.
+//   - tool_result carries {name, output, status, toolCallId, meta}; isError is
+//     status != "ok" (DESIGN §6.2). meta holds byte/token estimates.
+//   - A single user turn can span multiple provider_usage events (one generation
+//     per model call) plus interleaved tool_call/tool_result pairs.
 //
 // Phase 0 scope: this package loads a session and pretty-prints every event.
 // Payloads are dumped verbatim (not interpreted into traces) — interpretation,

@@ -265,17 +265,28 @@ Mirrors omp-langfuse §8.1 / `src/pricing.ts`, ported to Go, **now cache-aware**
 log carries `cachedInputTokens`/`cacheWriteTokens`/`reasoningTokens`:
 
 ```
-cost.input      = (promptTokens  - cachedInputTokens) * rate.input      / 1e6
-cost.cachedInput=  cachedInputTokens                 * rate.cacheRead   / 1e6
-cost.cacheWrite =  cacheWriteTokens                  * rate.cacheWrite  / 1e6
-cost.output     =  completionTokens                 * rate.output      / 1e6
+uncached        =  promptTokens - cachedInputTokens - cacheWriteTokens
+cost.input      =  uncached          * rate.input      / 1e6
+cost.cachedInput=  cachedInputTokens * rate.cacheRead   / 1e6
+cost.cacheWrite =  cacheWriteTokens  * rate.cacheWrite  / 1e6
+cost.output     =  completionTokens  * rate.output      / 1e6
 cost.total      = sum of the above
 ```
 
+`promptTokens` is the **total** input (uncached + cache-read + cache-write — `zeroruntime.Usage`
+doc, types.go:127), so **both** cache subsets must be subtracted from the input pool. Confirmed
+against a live z.ai/glm-5.2 capture (promptTokens 8149 = uncached 21 + cacheRead 8128) and against
+Zero's own `modelregistry.CalculateCost` (cost.go:91), which computes `uncached = input −
+cachedInput − cacheWrite`. An earlier draft of this section subtracted only `cachedInputTokens`,
+which double-counted `cacheWriteTokens` for Anthropic models (cache-write priced at both the input
+rate and the cache-write premium).
+
 Rates stored **per-million-tokens** (matches how providers publish), divided by `1e6` at compute
 time. `reasoningTokens` are typically billed at the output rate (provider-dependent; document per
-model). Compare to v1 (stream-json only), which could not price cache separately and over-stated
-input cost for cache-heavy runs — **the session log fixes this**.
+model). Implementation note (matching Zero, cost.go:80-94): only carve a cache subset out of the
+input pool when its rate is > 0 — models priced without a cache-read/cache-write rate leave those
+tokens billed at the full input rate. Compare to v1 (stream-json only), which could not price cache
+separately and over-stated input cost for cache-heavy runs — **the session log fixes this**.
 
 **Price resolution precedence** (first match wins), resolved per `metadata.modelId` (or
 `payload.model` on escalation):
