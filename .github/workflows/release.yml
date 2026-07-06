@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-npm:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: 'https://registry.npmjs.org'
+      - name: Verify package.json version matches tag
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./wrappers/npm/package.json').version")"
+          [ "$v" = "$pkg" ] || { echo "::error::tag $GITHUB_REF_NAME != package.json $pkg"; exit 1; }
+      - name: Verify release assets are downloadable
+        shell: bash
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          base="https://github.com/nathanpt/zero-langfuse/releases/download/v${v}"
+          for a in \
+            zero-langfuse_${v}_linux_amd64.tar.gz \
+            zero-langfuse_${v}_linux_arm64.tar.gz \
+            zero-langfuse_${v}_darwin_amd64.tar.gz \
+            zero-langfuse_${v}_darwin_arm64.tar.gz \
+            zero-langfuse_${v}_windows_amd64.zip \
+            zero-langfuse_${v}_windows_arm64.zip \
+            zero-langfuse_${v}_checksums.txt; do
+            curl -fsSLI -o /dev/null "$base/$a" || { echo "::error::$base/$a not downloadable"; exit 1; }
+          done
+      - working-directory: wrappers/npm
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

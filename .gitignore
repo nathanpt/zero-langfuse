@@ -10,3 +10,7 @@ config.json
 # Editor / OS
 .DS_Store
 *.swp
+
+# Node (npm wrapper has no deps; local tooling may create these)
+node_modules/
+*.tgz

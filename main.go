@@ -73,6 +73,8 @@ Examples:
   zero-langfuse sync --since 2026-07-01 --limit 50
 `
 
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprint(os.Stderr, usage)
@@ -94,7 +96,7 @@ func main() {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	case "version", "-v", "--version":
-		fmt.Println("zero-langfuse dev (phase 1)")
+		fmt.Printf("zero-langfuse %s\n", version)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", os.Args[1], usage)
 		os.Exit(2)

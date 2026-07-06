@@ -1,0 +1,37 @@
+{
+  "name": "@nathanpt/zero-langfuse",
+  "version": "0.1.0",
+  "description": "Langfuse observability for Zero — installs the zero-langfuse binary (GitHub Release).",
+  "type": "module",
+  "bin": {
+    "zero-langfuse": "bin/zero-langfuse.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs"
+  },
+  "files": [
+    "bin/zero-langfuse.js",
+    "scripts/postinstall.mjs"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nathanpt/zero-langfuse.git"
+  },
+  "homepage": "https://github.com/nathanpt/zero-langfuse#readme",
+  "bugs": {
+    "url": "https://github.com/nathanpt/zero-langfuse/issues"
+  },
+  "license": "MIT"
+}
