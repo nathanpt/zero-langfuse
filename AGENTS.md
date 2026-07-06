@@ -13,8 +13,11 @@ sub-agents** uniformly. Sibling to [`omp-langfuse`](https://github.com/nathanpt/
 reuse its principles (self-computed cost, REST ingestion, privacy presets, redaction) but the host
 forces a different architecture.
 
-> **Status: pre-implementation.** DESIGN.md is complete and source-verified; no code exists yet.
-> First task is Phase 0 (below).
+> **Status: Phase 0–1 complete and live-verified.** The session-log reader, trace/cost builders,
+> privacy presets + redaction, REST ingestion, and the `dump`/`trace`/`sync`/`setup`/`test` commands
+> are built and verified against a self-hosted Langfuse (§13 Q1–Q3, Q6 settled). Phase 2 (watch
+> mode) is deferred pending a real need for in-flight TUI tracing; post-hoc `trace`/`sync` cover the
+> rest. DESIGN.md remains authoritative where it disagrees with this file.
 
 ## The core decision (do not re-litigate)
 
