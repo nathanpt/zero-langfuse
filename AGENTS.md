@@ -17,7 +17,8 @@ forces a different architecture.
 > privacy presets + redaction, REST ingestion, and the `dump`/`trace`/`sync`/`setup`/`test` commands
 > are built and verified against a self-hosted Langfuse (§13 Q1–Q3, Q6 settled). Phase 2 (watch
 > mode) is deferred pending a real need for in-flight TUI tracing; post-hoc `trace`/`sync` cover the
-> rest. DESIGN.md remains authoritative where it disagrees with this file.
+> rest. DESIGN.md remains authoritative where it disagrees with this file. See
+> [`.docs/ROADMAP.md`](./.docs/ROADMAP.md) for status, sequencing, and deferred items.
 
 ## The core decision (do not re-litigate)
 
