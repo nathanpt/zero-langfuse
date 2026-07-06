@@ -18,6 +18,13 @@
 //   - Q3 (assistant-message completeness): the assistant `message` carries
 //     result.FinalAnswer in a single event — one read, no delta reassembly.
 //
+// All three were re-confirmed against a live z.ai/glm-5.2 capture. Note
+// (qualifies DESIGN §4): a plain-text `zero exec "prompt"` does NOT persist a
+// session — recording is gated by shouldUseExecSession (exec.go:435) and only
+// engages under --output-format stream-json|json, or --init-session-id/
+// --resume/--fork. The TUI persists unconditionally. The trace/sync path must
+// therefore expect text-mode exec runs to be invisible to a log reader.
+//
 // Phase 0 scope: this package loads a session and pretty-prints every event.
 // Payloads are dumped verbatim (not interpreted into traces) — interpretation,
 // segmentation, and cost are Phase 1.
