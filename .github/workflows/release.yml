@@ -30,7 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -59,6 +58,6 @@ jobs:
             curl -fsSLI -o /dev/null "$base/$a" || { echo "::error::$base/$a not downloadable"; exit 1; }
           done
       - working-directory: wrappers/npm
-        run: npm publish --access public --provenance
+        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
