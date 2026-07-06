@@ -22,14 +22,15 @@ import (
 	"github.com/nathanpt/zero-langfuse/internal/langfuse"
 	"github.com/nathanpt/zero-langfuse/internal/pricing"
 	"github.com/nathanpt/zero-langfuse/internal/session"
+	"github.com/nathanpt/zero-langfuse/internal/syncstate"
 	"github.com/nathanpt/zero-langfuse/internal/trace"
 )
 
 const usage = `zero-langfuse — Langfuse observability for Zero (session-log reader)
 
 Phase 1: ` + "`dump`" + ` (inspect), ` + "`trace`" + ` (post one session), ` + "`sync`" + `
-(backfill many), ` + "`setup`" + ` (enter credentials), and ` + "`test`" + ` (connectivity probe).
-watch/status are Phase 2 (DESIGN §15).
+(backfill many), ` + "`setup`" + ` (enter credentials), ` + "`test`" + ` (connectivity probe),
+and ` + "`status`" + ` (config summary). watch mode is Phase 2 (DESIGN §15), deferred.
 
 Usage:
   zero-langfuse dump <sessionId|dir|events.jsonl> [flags]
@@ -38,6 +39,7 @@ Usage:
   zero-langfuse sync [--since <YYYY-MM-DD>] [--limit N] [--dry-run]
   zero-langfuse setup [--host <url> --public-key <pk> --secret-key <sk>]
   zero-langfuse test
+  zero-langfuse status
 
 Subcommands:
   dump    Pretty-print a session's metadata.json and every events.jsonl event,
@@ -51,6 +53,8 @@ Subcommands:
           file (0600). Flags --host/--public-key/--secret-key or env vars skip
           the prompts; --secret-key avoids typing the key visibly.
   test    POST one probe trace to confirm the host + credentials work.
+  status  Print the resolved config (host, masked keys, privacy, sessions count)
+          without uploading anything.
 
 Common flags:
   --latest           Act on the most recently active session (trace/dump).
@@ -77,6 +81,8 @@ func main() {
 	switch os.Args[1] {
 	case "dump":
 		cmdDump(os.Args[2:])
+	case "status":
+		cmdStatus(os.Args[2:])
 	case "trace":
 		cmdTrace(os.Args[2:])
 	case "setup":
@@ -188,6 +194,7 @@ func cmdSync(args []string) {
 	since := fs.String("since", "", "only sessions created on/after this date (YYYY-MM-DD)")
 	limit := fs.Int("limit", 0, "cap the number of sessions posted (0 = all)")
 	dryRun := fs.Bool("dry-run", false, "print batches as JSON without posting")
+	force := fs.Bool("force", false, "re-post sessions even if unchanged since last sync")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	fs.Parse(args)
 
@@ -232,12 +239,30 @@ func cmdSync(args []string) {
 	}
 	pol := resolvePolicy(cfg, "")
 
+	// Cursor: skip sessions whose events.jsonl is unchanged since the last
+	// successful sync (the log is append-only, so mtime advancing = new data).
+	statePath, err := syncstate.Path()
+	if err != nil {
+		fail(err)
+	}
+	state, err := syncstate.Load(statePath)
+	if err != nil {
+		fail(err)
+	}
+
 	posted := 0
 	totalObs := 0
 	totalCost := 0.0
 	for _, c := range cands {
 		if *limit > 0 && posted >= *limit {
 			break
+		}
+		// Cursor: skip unchanged sessions (unless --force). Applies to dry-run
+		// too so it previews exactly what a real run would post.
+		mtime := eventsMtime(filepath.Join(dir, c.name))
+		if !*force && !state.ShouldPost(c.name, mtime) {
+			fmt.Fprintf(os.Stderr, "skip %s: unchanged since last sync (--force to re-post)\n", c.name)
+			continue
 		}
 		sess, err := session.Load(c.name, dir)
 		if err != nil {
@@ -260,10 +285,16 @@ func cmdSync(args []string) {
 			continue
 		}
 		cancel()
+		state.Mark(sess.ID, mtime)
 		posted++
 		totalObs += observationCount(evs)
 		totalCost += cost
 		fmt.Fprintf(os.Stderr, "synced %s: %d turns, %d obs, $%.6f\n", sess.ID, turns, observationCount(evs), cost)
+	}
+	if !*dryRun {
+		if err := syncstate.Save(statePath, state); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save sync state: %v\n", err)
+		}
 	}
 	fmt.Printf("synced %d session(s), %d observations, $%.6f\n", posted, totalObs, totalCost)
 }
@@ -370,6 +401,19 @@ func peekCreatedAt(dir string) string {
 	}
 	_ = json.Unmarshal(raw, &m)
 	return m.CreatedAt
+}
+
+// eventsMtime returns the events.jsonl mtime (Unix nanoseconds), the sync
+// cursor's growth signal. Falls back to metadata.json, then 0.
+func eventsMtime(dir string) int64 {
+	fi, err := os.Stat(filepath.Join(dir, "events.jsonl"))
+	if err != nil {
+		fi, err = os.Stat(filepath.Join(dir, "metadata.json"))
+		if err != nil {
+			return 0
+		}
+	}
+	return fi.ModTime().UnixNano()
 }
 
 func sinceOK(createdAt, since string) bool {
@@ -492,6 +536,75 @@ func cmdTest(args []string) {
 	}
 	fmt.Printf("OK: connected to %s \u2014 auth accepted, ingestion round-trip succeeded.\n", cfg.Host)
 	fmt.Fprintln(os.Stderr, "(one probe trace \"zero-langfuse connectivity test\" was created; re-running overwrites it.)")
+}
+
+func cmdStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	fs.Parse(args)
+
+	cfg, err := config.Load(envMap())
+	if err != nil {
+		fail(err)
+	}
+	path := mustConfigPath()
+
+	fmt.Printf("config:   %s\n", path)
+	fmt.Printf("host:     %s\n", cfg.Host)
+	fmt.Printf("pubKey:   %s\n", maskedOrUnset(cfg.PublicKey))
+	fmt.Printf("secKey:   %s\n", setOrUnset(cfg.SecretKey))
+	fmt.Printf("privacy:  %s\n", cfg.Privacy)
+	fmt.Printf("flushAt:  %d\n", cfg.FlushAt)
+	if n := len(cfg.Pricing); n > 0 {
+		fmt.Printf("pricing:  %d model override(s)\n", n)
+	} else {
+		fmt.Printf("pricing:  (bundled table only)\n")
+	}
+
+	if cfg.SessionsDir != "" {
+		count := sessionsSummary(cfg.SessionsDir)
+		if count >= 0 {
+			fmt.Printf("sessions: %d under %s\n", count, cfg.SessionsDir)
+		} else {
+			fmt.Printf("sessions: dir not found (%s)\n", cfg.SessionsDir)
+		}
+	}
+
+	if cfg.PublicKey == "" || cfg.SecretKey == "" {
+		fmt.Fprintln(os.Stderr, "\ncredentials not set — run `zero-langfuse setup`.")
+	} else {
+		fmt.Fprintln(os.Stderr, "\nrun `zero-langfuse test` to verify connectivity.")
+	}
+}
+
+func maskedOrUnset(k string) string {
+	if k == "" {
+		return "(unset)"
+	}
+	return config.Mask(k)
+}
+
+func setOrUnset(k string) string {
+	if k == "" {
+		return "(unset)"
+	}
+	return "set"
+}
+
+// sessionsSummary returns the count of session subdirectories, or -1 if the
+// dir cannot be read.
+func sessionsSummary(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			n++
+		}
+	}
+	return n
 }
 
 func prompt(in *bufio.Reader, label, def string) string {
