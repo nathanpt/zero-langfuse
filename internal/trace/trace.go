@@ -393,13 +393,20 @@ func usageDetails(ev *session.Event) (map[string]int, pricing.UsageTokens) {
 }
 
 func costMap(c pricing.CostBreakdown) map[string]float64 {
-	return map[string]float64{
-		"input":       c.Input,
-		"cachedInput": c.CachedInput,
-		"cacheWrite":  c.CacheWrite,
-		"output":      c.Output,
-		"total":       c.Total,
+	// Mirror usageDetails: input/output/total always present; cache components
+	// only when non-zero (keeps the payload lean and consistent).
+	m := map[string]float64{
+		"input":  c.Input,
+		"output": c.Output,
+		"total":  c.Total,
 	}
+	if c.CachedInput != 0 {
+		m["cachedInput"] = c.CachedInput
+	}
+	if c.CacheWrite != 0 {
+		m["cacheWrite"] = c.CacheWrite
+	}
+	return m
 }
 
 // ---- payload accessors (session payloads are json.RawMessage) ----
