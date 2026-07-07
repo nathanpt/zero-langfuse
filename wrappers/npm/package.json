@@ -1,6 +1,6 @@
 {
   "name": "@nathanpt/zero-langfuse",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Langfuse observability for Zero — installs the zero-langfuse binary (GitHub Release).",
   "type": "module",
   "bin": {
